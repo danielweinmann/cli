@@ -1,0 +1,31 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9624f3b6a506",
+  "session_id": "176ac652-11e9-4515-916b-01170eddd684",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T13:33:49.793582Z",
+  "branch": "fix/push-checkpoint-data-same-turn",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_push.go"
+  ],
+  "agent": "Claude Code",
+  "transcript_identifier_at_start": "f974a87a-c1d7-41d0-a1d1-2888f439f3dc",
+  "token_usage": {
+    "input_tokens": 19,
+    "cache_creation_tokens": 16969,
+    "cache_read_tokens": 371347,
+    "output_tokens": 792,
+    "api_call_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T13:33:49.74452Z",
+    "agent_lines": 4,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 4,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-danielweinmann-projects-danielweinmann-entireio-cli/176ac652-11e9-4515-916b-01170eddd684.jsonl"
+}

@@ -1,0 +1,26 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "9624f3b6a506",
+  "strategy": "manual-commit",
+  "branch": "fix/push-checkpoint-data-same-turn",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/strategy/manual_commit_push.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/96/24f3b6a506/0/metadata.json",
+      "transcript": "/96/24f3b6a506/0/full.jsonl",
+      "context": "/96/24f3b6a506/0/context.md",
+      "content_hash": "/96/24f3b6a506/0/content_hash.txt",
+      "prompt": "/96/24f3b6a506/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 19,
+    "cache_creation_tokens": 16969,
+    "cache_read_tokens": 371347,
+    "output_tokens": 792,
+    "api_call_count": 12
+  }
+}
