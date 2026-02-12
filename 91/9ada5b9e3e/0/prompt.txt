@@ -1,0 +1,148 @@
+Implement the following plan:
+
+# Fix: Checkpoint data not pushed when agent commits and pushes in same turn
+
+Issue: #275
+
+## Context
+
+When an AI agent commits and pushes in the same turn, the session checkpoint data on `entire/checkpoints/v1` is never included in that push — it's always one push behind.
+
+**Root cause**: PostCommit sees the session in `ACTIVE` state and defers condensation (ACTIVE → ACTIVE_COMMITTED, sets `PendingCheckpointID`). Condensation only happens later at turn-end (`HandleTurnEnd`). But by then, PrePush has already pushed the stale `entire/checkpoints/v1` branch.
+
+**Timeline**:
+1. Agent commits → PostCommit: ACTIVE → ACTIVE_COMMITTED (deferred)
+2. Agent pushes → PrePush: pushes stale `entire/checkpoints/v1`
+3. Turn ends → HandleTurnEnd: condenses to `entire/checkpoints/v1` (too late)
+
+## Approach: Record remote in PrePush, push again at turn-end
+
+Instead of condensing mid-session (which would split session data and interfere with ongoing agent work), we **record the push remote** in session state during PrePush, then **push again at turn-end** after condensation completes.
+
+This preserves the existing condensation timing and works for both scenarios:
+- **Agent commits + pushes in same turn**: PrePush records remote → turn-end condenses → pushes fresh data
+- **Human pushes in separate tab while agent is active**: PrePush records remote → agent's turn-end condenses → pushes fresh data
+
+## Changes
+
+### 1. `cmd/entire/cli/session/state.go` — Add field to State struct
+
+Add `PendingPushRemote` field (follows the same pattern as `PendingCheckpointID`):
+
+```go
+// PendingPushRemote is the git remote name from a push that happened while
+// condensation was deferred (ACTIVE_COMMITTED phase). After condensation
+// completes at turn-end, entire/checkpoints/v1 is pushed to this remote.
+// Cleared after push or on new prompt start.
+PendingPushRemote string `json:"pending_push_remote,omitempty"`
+```
+
+Place it after `PendingCheckpointID` (line 64) since they're related concepts.
+
+### 2. `cmd/entire/cli/strategy/manual_commit_push.go` — Record remote in PrePush
+
+Modify `PrePush` to detect ACTIVE_COMMITTED sessions with pending condensation and record the remote:
+
+```go
+func (s *ManualCommitStrategy) PrePush(remote string) error {
+    s.recordPendingPushRemote(remote)
+    return pushSessionsBranchCommon(remote, paths.MetadataBranchName)
+}
+```
+
+New method `recordPendingPushRemote(remote)`:
+1. `GetWorktreePath()` → `s.findSessionsForWorktree()`
+2. For each session where `Phase == ACTIVE_COMMITTED` and `PendingCheckpointID != ""`:
+   - Set `state.PendingPushRemote = remote`
+   - `s.saveSessionState(state)`
+3. All errors logged but never returned (hooks must not block push)
+
+New imports: `"context"`, `"log/slog"`, `"github.com/entireio/cli/cmd/entire/cli/logging"`, `"github.com/entireio/cli/cmd/entire/cli/session"`
+
+### 3. `cmd/entire/cli/strategy/manual_commit_hooks.go` — Push after condensation at turn-end
+
+**In `handleTurnEndCondense`** (line ~1534, after `condenseAndUpdateState` and shadow branch cleanup):
+
+```go
+if state.PendingPushRemote != "" {
+    remote := state.PendingPushRemote
+    state.PendingPushRemote = ""
+    logging.Info(logCtx, "turn-end: pushing condensed checkpoint data",
+        slog.String("remote", remote))
+    pushSessionsBranchCommon(remote, paths.MetadataBranchName)
+}
+```
+
+Note: `pushSessionsBranchCommon` already handles settings check, branch existence, up-to-date detection, non-fast-forward recovery, and error logging internally. Its errors are silently swallowed (returns nil on failure with stderr warnings).
+
+**In `InitializeSession`** (line ~1248, where PendingCheckpointID is cleared):
+
+```go
+if state.PendingPushRemote != "" {
+    state.PendingPushRemote = ""
+}
+```
+
+This handles the Ctrl-C recovery case: if the agent crashes before turn-end, the stale PendingPushRemote is cleared on next prompt start.
+
+### 4. Tests — `cmd/entire/cli/strategy/manual_commit_push_test.go` (new file)
+
+Follow patterns from `phase_postcommit_test.go` (same package, same helpers: `setupGitRepo`, `setupSessionWithCheckpoint`, `commitWithCheckpointTrailer`). Tests use `t.Chdir()` (no `t.Parallel()` since they need cwd).
+
+**Key tests:**
+
+1. **`TestRecordPendingPushRemote_ActiveCommittedSession`**: Session in ACTIVE_COMMITTED with PendingCheckpointID → sets PendingPushRemote
+2. **`TestRecordPendingPushRemote_IdleSession_Skipped`**: IDLE session → PendingPushRemote stays empty
+3. **`TestRecordPendingPushRemote_ActiveCommitted_NoPendingID_Skipped`**: ACTIVE_COMMITTED without PendingCheckpointID → skipped
+4. **`TestRecordPendingPushRemote_NoSessions_Noop`**: No sessions → no-op
+5. **`TestHandleTurnEnd_PushAfterCondensation`**: Full flow — PostCommit (ACTIVE → ACTIVE_COMMITTED), record remote, HandleTurnEnd condenses + verifies PendingPushRemote is cleared
+6. **`TestInitializeSession_ClearsPendingPushRemote`**: PendingPushRemote cleared on new prompt
+
+## Key functions reused
+
+| Function | File |
+|---|---|
+| `s.findSessionsForWorktree()` | `manual_commit_session.go` |
+| `s.saveSessionState()` | `manual_commit_session.go` |
+| `pushSessionsBranchCommon()` | `push_common.go` |
+| `setupGitRepo()` | `phase_wiring_test.go` |
+| `setupSessionWithCheckpoint()` | `phase_postcommit_test.go` |
+| `commitWithCheckpointTrailer()` | `phase_postcommit_test.go` |
+
+## Why this is safe
+
+- **No condensation timing change**: Condensation still happens at turn-end as designed
+- **No mid-session data splitting**: Session data is condensed as one unit
+- **Idempotent**: `pushSessionsBranchCommon` checks if local differs from remote before pushing
+- **Settings-aware**: The turn-end push respects `push_sessions` disabled setting (checked inside `pushSessionsBranchCommon`)
+- **Ctrl-C safe**: `PendingPushRemote` cleared in `InitializeSession` on next prompt
+- **Hooks stay silent**: All errors logged, never returned
+
+## Verification
+
+```bash
+mise run fmt && mise run lint && mise run test:ci
+```
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/danielweinmann/.REDACTED.jsonl
+
+---
+
+Awesome! Let's create a new topic branch and draft PR.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+Let's not say it closes the issue. Let's just mention it.
+
+---
+
+[Request interrupted by user for tool use]
+
+---
+
+For this one, you can be more thorough on the description. For the testing section, please only reference manual testing strategies
